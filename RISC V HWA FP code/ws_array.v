@@ -2,12 +2,8 @@
 
 module ws_array #(
     parameter N = 32,
-    parameter ACC_WIDTH = 32, // Updated to 32-bit to match DiP
+    parameter ACC_WIDTH = 32, 
     parameter FRAC_BITS = 16,
-    // MUST match pe_bf16.v's act_valid_in -> act_valid_out latency and
-    // ws_fsm.v's PE_LATENCY_PER_ROW. Every row-skew / output-skew FIFO
-    // below has to be stretched by this factor, since each systolic hop
-    // now costs this many cycles instead of 1.
     parameter PE_LATENCY_PER_ROW = 1
 ) (
     input clk,
@@ -155,9 +151,7 @@ module ws_array #(
                 );
             end
 
-            // =========================================================
             // 4-STAGE PIPELINED BF16 CONVERSION
-            // =========================================================
             reg stage1_sign;
             reg [ACC_WIDTH-1:0] stage1_abs_val;
             
@@ -187,15 +181,15 @@ module ws_array #(
                     stage4_result <= 16'd0;
                 end else if (array_en) begin
                     
-                    // -------------------------------------------------
+
                     // STAGE 1: Sign extraction and Absolute Value
-                    // -------------------------------------------------
+
                     stage1_sign    <= packed_sums_out[ACC_WIDTH-1];
                     stage1_abs_val <= packed_sums_out[ACC_WIDTH-1] ? -packed_sums_out : packed_sums_out;
                     
-                    // -------------------------------------------------
+
                     // STAGE 2: Leading Zero Count
-                    // -------------------------------------------------
+
                     stage2_sign    <= stage1_sign;
                     stage2_abs_val <= stage1_abs_val;
                     
@@ -205,17 +199,16 @@ module ws_array #(
                     end
                     stage2_lz <= temp_lz;
 
-                    // -------------------------------------------------
+
                     // STAGE 3: Normalization and Base Exponent
-                    // -------------------------------------------------
+
                     stage3_sign      <= stage2_sign;
                     stage3_abs_val   <= stage2_abs_val;
                     stage3_norm_val  <= stage2_abs_val << stage2_lz;
                     stage3_fixed_exp <= 10'sd127 + (ACC_WIDTH-1) - stage2_lz - FRAC_BITS;
 
-                    // -------------------------------------------------
                     // STAGE 4: Rounding, Clamping, and Packing
-                    // -------------------------------------------------
+
                     if (stage3_abs_val == 0) begin
                         stage4_result <= 16'd0;
                     end else begin
@@ -225,12 +218,9 @@ module ws_array #(
                         t_exp = (stage3_fixed_exp <= 0) ? 8'd0 : 
                                 (stage3_fixed_exp >= 255) ? 8'd255 : stage3_fixed_exp[7:0];
                         
-                        // ALIGNMENT FIX FOR 32-BIT ACC_WIDTH:
-                        // Top hidden bit is 31. Mantissa is 30:24. Rounding bit is 23.
                         t_rounded_mant = {1'b0, stage3_norm_val[30:24]} + stage3_norm_val[23];
                         
                         if (t_rounded_mant[7]) begin
-                            // Mantissa overflowed during rounding
                             stage4_result <= {stage3_sign, t_exp + 8'd1, 7'd0};
                         end else begin
                             stage4_result <= {stage3_sign, t_exp, t_rounded_mant[6:0]};

@@ -1,16 +1,20 @@
 // ---------------------------------------------------------
 // Bare-Metal RISC-V DiP Systolic Array Emulator with Tiling
+// Computes C = A x B by tiling into BASE_LIMIT x BASE_LIMIT blocks,
+// running each block pair through a DiP array model, accumulating
+// the partial results, and checking against a CPU matmul.
 // ---------------------------------------------------------
 
 #define BASE_LIMIT 8
 
 #include "uart_debug.h"
 
-// Matrix Dimensions (Keep these scaled to fit your specific board's SRAM)
+// A[M][N] x B[N][K] = C[M][K], sized to fit the 16KB SRAM
 #define M_DIM 24
 #define N_DIM 24
 #define K_DIM 24
 
+// Tiles per dimension (+1 for ragged edges), multiplied
 #define MAX_JOBS ((M_DIM / BASE_LIMIT + 1) * (N_DIM / BASE_LIMIT + 1) * (K_DIM / BASE_LIMIT + 1))
 
 struct Tile {
@@ -22,6 +26,7 @@ struct Tile {
     int height;
 };
 
+// One array run: an A tile times a B tile
 struct HwaJob {
     Tile a_tile;
     Tile b_tile;
@@ -38,6 +43,7 @@ float max_f(float a, float b) {
 }
 
 // --- HARDWARE SCHEDULER ---
+// Builds the tile job list; returns the job count
 int matmul_hwa_feeder(int M, int N, int K, int base_limit, HwaJob* job_queue) {
     int job_count = 0;
     
@@ -51,6 +57,7 @@ int matmul_hwa_feeder(int M, int N, int K, int base_limit, HwaJob* job_queue) {
             int height_B = n_end - n;
             int width_B = k_end - k;
             
+            // B tile stays fixed while every A tile (m loop) streams past it
             Tile b_tile = { n, n_end, k, k_end, width_B, height_B };
             for (int m = 0; m < M; m += base_limit) {
                 
@@ -72,6 +79,7 @@ int matmul_hwa_feeder(int M, int N, int K, int base_limit, HwaJob* job_queue) {
 }
 
 // --- HARDWARE ARRAY SIMULATION ---
+// Rotates column i of B up by i rows (the DiP weight layout)
 void permute(const float* matrix, float* permutated_matrix) {
     for (int i = 0; i < BASE_LIMIT; i++) {
         for (int j = 0; j < BASE_LIMIT; j++) {
@@ -82,16 +90,11 @@ void permute(const float* matrix, float* permutated_matrix) {
 }
 
 void DiP(const float* A, const float* B, float* C) {
-    // These were plain stack locals before. Three 32x32 float buffers is
-    // 3 * 4KB = 12KB, live simultaneously with W+current_A+next_A at various
-    // points in this function -- plus whatever the caller (main) already has
-    // on the stack. On a real embedded core with a few KB of stack that is
-    // an overflow waiting to happen. `static` here means "allocate once in
-    // .bss, not on the stack" -- same lifetime as a global, but scoped to
-    // this function so it can't be touched from anywhere else.
+    // static: kept in .bss instead of the small stack
     static float W[BASE_LIMIT * BASE_LIMIT] = {0.0f};
     permute(B, W);
     
+    // Row i of A rotated left by i (diagonal input)
     static float current_A[BASE_LIMIT * BASE_LIMIT] = {0.0f}; 
     for (int i = 0; i < BASE_LIMIT; i++) {
         for (int j = 0; j < BASE_LIMIT; j++) {
@@ -103,6 +106,7 @@ void DiP(const float* A, const float* B, float* C) {
     for(int i = 0; i < BASE_LIMIT * BASE_LIMIT; i++) { C[i] = 0.0f; }
 
     for (int cycle = 0; cycle < BASE_LIMIT; cycle++) {
+        // All PEs multiply-accumulate; data in PE row i came from A row (i - cycle)
         for (int i = 0; i < BASE_LIMIT; i++) {
             for (int j = 0; j < BASE_LIMIT; j++) {
                 int output_row = (i - cycle + BASE_LIMIT) % BASE_LIMIT;
@@ -110,6 +114,7 @@ void DiP(const float* A, const float* B, float* C) {
             }
         }
         
+        // Shift A diagonally: down one row, left one column, wrapping
         static float next_A[BASE_LIMIT * BASE_LIMIT] = {0.0f};
         for (int i = 0; i < BASE_LIMIT; i++) {
             for (int j = 0; j < BASE_LIMIT; j++) {
@@ -126,6 +131,7 @@ void DiP(const float* A, const float* B, float* C) {
 }
 
 // --- MEMORY ACCESS HELPERS ---
+// Copies a tile out of a full matrix, zero-padding past the edges
 void extract_tile(const float* mat_full, int full_cols, int row_start, int col_start, int max_row, int max_col, float* tile) {
     for (int i = 0; i < BASE_LIMIT; i++) {
         for (int j = 0; j < BASE_LIMIT; j++) {
@@ -138,6 +144,7 @@ void extract_tile(const float* mat_full, int full_cols, int row_start, int col_s
     }
 }
 
+// Adds a tile result into the full output matrix
 void accumulate_tile(float* C_full, int full_cols, const float* C_tile, int row_start, int col_start, int max_row, int max_col) {
     for (int i = 0; i < BASE_LIMIT; i++) {
         for (int j = 0; j < BASE_LIMIT; j++) {
@@ -148,6 +155,7 @@ void accumulate_tile(float* C_full, int full_cols, const float* C_tile, int row_
     }
 }
 
+// Reference matmul on the CPU
 void full_cpu_matmul(const float* A, const float* B, float* C, int M, int N, int K) {
     for (int i = 0; i < M * K; i++) C[i] = 0.0f; // zero out
     
@@ -162,17 +170,12 @@ void full_cpu_matmul(const float* A, const float* B, float* C, int M, int N, int
 
 // --- STATIC ALLOCATIONS ---
 // Allocated in .bss segment to avoid blowing up the micro stack
+// (C_HW_full relies on startup.s zeroing .bss)
 static float A_full[M_DIM * N_DIM];
 static float B_full[N_DIM * K_DIM];
 static float C_HW_full[M_DIM * K_DIM];
 static float C_CPU_full[M_DIM * K_DIM];
-
 static HwaJob scheduled_jobs[MAX_JOBS];
-
-// Tile working buffers -- were stack locals in main() before. Same reasoning
-// as the buffers inside DiP(): 3 * 4KB on the stack of main(), simultaneously
-// alive with whatever main() calls into (DiP(), extract_tile(), etc). Pin
-// them to .bss like every other sizeable buffer in this file.
 static float A_tile[BASE_LIMIT * BASE_LIMIT];
 static float B_tile[BASE_LIMIT * BASE_LIMIT];
 static float C_tile[BASE_LIMIT * BASE_LIMIT];
@@ -199,8 +202,6 @@ int main() {
 
     // 2. Generate Hardware Jobs
     int total_jobs = matmul_hwa_feeder(M_DIM, N_DIM, K_DIM, BASE_LIMIT, scheduled_jobs);
-
-    // Buffer tiles for processing (declared as static globals above, not here)
 
     // 3. Emulate Hardware Dataflow
     for (int idx = 0; idx < total_jobs; idx++) {
@@ -243,7 +244,7 @@ int main() {
     // Set hardware status register (visible via GDB, if you have one attached)
     VERIFICATION_STATUS = passed;
 
-    // No OpenOCD on this board -- report over UART since GDB isn't an option
+    // No OpenOCD on this board -- report over UART instead
     report_verification(passed, fail_index, fail_hw, fail_cpu);
 
     // Bare-metal infinite loop (prevents CPU from marching into undefined memory)

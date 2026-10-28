@@ -1,22 +1,20 @@
 // ---------------------------------------------------------
 // Bare-Metal RISC-V WS Systolic Array Emulator with Tiling
+// Computes C = A x B by tiling into BASE_LIMIT x BASE_LIMIT blocks,
+// running each block pair through a weight-stationary array model,
+// accumulating the partial results, and checking against a CPU matmul.
 // ---------------------------------------------------------
 
 #define BASE_LIMIT 8
 
 #include "uart_debug.h"
 
-// Adjust these based on your board's available SRAM / DRAM
-// HiFive1 Rev B has 16KB total DTIM. At BASE_LIMIT=8, M_DIM=N_DIM=K_DIM=24:
-// full matrices 9.0KB + tile buffers 0.75KB + WS() internal state 1.0KB +
-// job queue (MAX_JOBS=64) 3.0KB = ~13.75KB used, ~2.25KB free for stack.
-// This is close to the real ceiling for this chip -- see the SRAM budget
-// walkthrough in chat before pushing these any higher.
+// A[M][N] x B[N][K] = C[M][K], sized to fit the 16KB SRAM
 #define M_DIM 24
 #define N_DIM 24
 #define K_DIM 24
 
-// Maximum number of 8x8 tiles needed for the workload
+// Tiles per dimension (+1 for ragged edges), multiplied
 #define MAX_JOBS ((M_DIM / BASE_LIMIT + 1) * (N_DIM / BASE_LIMIT + 1) * (K_DIM / BASE_LIMIT + 1))
 
 struct Tile {
@@ -28,6 +26,7 @@ struct Tile {
     int height;
 };
 
+// One array run: an A tile times a B tile
 struct HwaJob {
     Tile a_tile;
     Tile b_tile;
@@ -47,6 +46,7 @@ int min_i(int a, int b) {
 }
 
 // --- HARDWARE SCHEDULER ---
+// Builds the tile job list; returns the job count
 int matmul_hwa_feeder(int M, int N, int K, int base_limit, HwaJob* job_queue) {
     int job_count = 0;
     
@@ -60,6 +60,7 @@ int matmul_hwa_feeder(int M, int N, int K, int base_limit, HwaJob* job_queue) {
             int height_B = n_end - n;
             int width_B = k_end - k;
             
+            // B tile stays fixed while every A tile (m loop) streams past it
             Tile b_tile = { n, n_end, k, k_end, width_B, height_B };
             for (int m = 0; m < M; m += base_limit) {
                 
@@ -81,19 +82,14 @@ int matmul_hwa_feeder(int M, int N, int K, int base_limit, HwaJob* job_queue) {
 }
 
 // --- WEIGHT STATIONARY (WS) ARRAY SIMULATION ---
+// B[i][j] stays in PE(i,j). A flows left to right, partial sums flow top to bottom.
 void WS(const float* A, const float* B, float* C) {
     // Hardware pipeline registers between the PEs.
-    // static: these are 4 x 4KB buffers. Left as stack locals, that's 16KB
-    // of simultaneous stack depth inside one function call -- worse than the
-    // DiP() case. Pin to .bss instead.
+    // static: kept in .bss instead of the small stack
     static float in_regs[BASE_LIMIT * BASE_LIMIT] = {0.0f};
     static float psum_regs[BASE_LIMIT * BASE_LIMIT] = {0.0f};
 
-    // IMPORTANT: static's "= {0.0f}" initializer only runs once ever (first
-    // call), not on every call like it did when these were stack locals.
-    // But this pipeline state MUST start empty at the beginning of every
-    // tile job, or job N+1 starts with leftover register values from job N
-    // -- a silent wrong-answer bug. So reset explicitly, every call.
+    // static initializers run only once, so clear the pipeline for every tile
     for (int i = 0; i < BASE_LIMIT * BASE_LIMIT; i++) {
         in_regs[i] = 0.0f;
         psum_regs[i] = 0.0f;
@@ -104,27 +100,13 @@ void WS(const float* A, const float* B, float* C) {
         C[i] = 0.0f;
     }
 
+    // Fill (N) + compute (N) + drain (N)
     int max_cycles = 3 * BASE_LIMIT;
 
     for (int cycle = 0; cycle < max_cycles; cycle++) {
+        // Register values after this clock edge
         static float next_in_regs[BASE_LIMIT * BASE_LIMIT];
         static float next_psum_regs[BASE_LIMIT * BASE_LIMIT];
-
-        // Both arrays get fully rewritten by the code below EXCEPT
-        // next_psum_regs row 0 (nothing ever assigns "i+1==0", there's no
-        // PE row -1). I originally assumed that meant this reset loop was
-        // load-bearing -- I tested it by removing it, and the result was
-        // identical. Reason: static arrays with no initializer are
-        // zero-initialized once, and since row 0 is never written anywhere
-        // else in the algorithm, it just stays at that initial zero forever.
-        // So on THIS (hosted) build, this loop is redundant.
-        //
-        // Keep it anyway for the bare-metal build: that zero-init guarantee
-        // is a C++ language guarantee backed by your *startup code* clearing
-        // .bss before main() runs. Nothing does that for you automatically
-        // on real hardware -- and the minimal startup stub we'll write in
-        // the next step won't either, unless we add it. This loop makes
-        // correctness independent of whether .bss got zeroed at boot.
         for (int i = 0; i < BASE_LIMIT * BASE_LIMIT; i++) {
             next_in_regs[i] = 0.0f;
             next_psum_regs[i] = 0.0f;
@@ -143,6 +125,7 @@ void WS(const float* A, const float* B, float* C) {
                 if (i + 1 < BASE_LIMIT) {
                     next_psum_regs[(i + 1) * BASE_LIMIT + j] = mac;
                 } else { 
+                    // Bottom row: C row r leaves column j at cycle r + N + j
                     int output_row = cycle - BASE_LIMIT - j;
                     if (output_row >= 0 && output_row < BASE_LIMIT) {
                         C[output_row * BASE_LIMIT + j] = mac;
@@ -151,7 +134,7 @@ void WS(const float* A, const float* B, float* C) {
             }
         }
         
-        // 2. Emulate Input FIFOs
+        // 2. Emulate Input FIFOs (row i delayed by i cycles)
         for (int i = 0; i < BASE_LIMIT; i++) {
             int input_row = cycle - i; 
             if (input_row >= 0 && input_row < BASE_LIMIT) {
@@ -170,6 +153,7 @@ void WS(const float* A, const float* B, float* C) {
 }
 
 // --- MEMORY ACCESS HELPERS ---
+// Copies a tile out of a full matrix, zero-padding past the edges
 void extract_tile(const float* mat_full, int full_cols, int row_start, int col_start, int max_row, int max_col, float* tile) {
     for (int i = 0; i < BASE_LIMIT; i++) {
         for (int j = 0; j < BASE_LIMIT; j++) {
@@ -182,6 +166,7 @@ void extract_tile(const float* mat_full, int full_cols, int row_start, int col_s
     }
 }
 
+// Adds a tile result into the full output matrix
 void accumulate_tile(float* C_full, int full_cols, const float* C_tile, int row_start, int col_start, int max_row, int max_col) {
     for (int i = 0; i < BASE_LIMIT; i++) {
         for (int j = 0; j < BASE_LIMIT; j++) {
@@ -192,6 +177,7 @@ void accumulate_tile(float* C_full, int full_cols, const float* C_tile, int row_
     }
 }
 
+// Reference matmul on the CPU
 void full_cpu_matmul(const float* A, const float* B, float* C, int M, int N, int K) {
     for (int i = 0; i < M * K; i++) C[i] = 0.0f; 
     
@@ -212,7 +198,7 @@ static float C_HW_full[M_DIM * K_DIM];
 static float C_CPU_full[M_DIM * K_DIM];
 static HwaJob scheduled_jobs[MAX_JOBS];
 
-// Hardware registers for tile extraction
+// Working tile buffers
 static float A_tile[BASE_LIMIT * BASE_LIMIT];
 static float B_tile[BASE_LIMIT * BASE_LIMIT];
 static float C_tile[BASE_LIMIT * BASE_LIMIT];
@@ -259,7 +245,7 @@ int main() {
     // 4. Baseline CPU compute
     full_cpu_matmul(A_full, B_full, C_CPU_full, M_DIM, N_DIM, K_DIM);
 
-    // 5. Verification
+    // 5. Verification (Relative Tolerance)
     int passed = 1; 
     float relative_epsilon = 1e-4f; 
     int fail_index = -1;
@@ -282,11 +268,10 @@ int main() {
         }
     }
 
-    // Latch status for debugger (harmless to leave in -- costs nothing,
-    // and still works if you DO ever get a debugger attached some other way)
+    // Latch status for debugger
     VERIFICATION_STATUS = passed;
 
-    // No OpenOCD on this board -- report over UART since GDB isn't an option
+    // No OpenOCD on this board -- report over UART instead
     report_verification(passed, fail_index, fail_hw, fail_cpu);
 
     // Halt execution (Bare-metal trap)

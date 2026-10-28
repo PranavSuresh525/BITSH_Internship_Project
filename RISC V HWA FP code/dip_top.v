@@ -1,32 +1,4 @@
 `timescale 1ns / 1ps
-//////////////////////////////////////////////////////////////////////////////
-// dip_top #(N)
-//
-// Self-contained NxN BF16 DiP matrix-multiply accelerator, now built on
-// real BRAM banks (bf16_bram_bank) instead of a flat register file that's
-// read out all-at-once -- the old approach (a single N*N-wide
-// combinational bus) cannot map to actual block RAM, which has only 1-2
-// ports; this one can.
-//
-// Storage: N weight banks + N activation banks + N output banks, each
-// N-deep. Bank c holds COLUMN c of its matrix (one element per row), so
-// reading/writing one address across all N banks in parallel gives a
-// whole matrix ROW per cycle -- exactly what dip_fsm/dip_array need, and
-// exactly how a real synthesizable design would have to be organized.
-//
-// Software/driver contract (unchanged from before):
-//   1) Write the RAW (unpermuted) weight matrix into the weight banks via
-//      weight_wr_en/weight_wr_addr/weight_wr_data (linear address,
-//      addr = row*N + col -- decoded into bank=col, row internally). The
-//      FSM permutes it on the fly while streaming it into the array.
-//   2) Write the raw (unpermuted) activation matrix the same way via
-//      input_wr_en/input_wr_addr/input_wr_data.
-//   3) Pulse `start` for one cycle.
-//   4) Wait for `done` (pulses high for one cycle).
-//   5) Read the NxN result out one element at a time via
-//      output_rd_addr/output_rd_data (linear address, 1-cycle latency --
-//      present an address, the data is valid the cycle after).
-//////////////////////////////////////////////////////////////////////////////
 module dip_top #(
     parameter N = 16
 ) (
@@ -56,12 +28,6 @@ module dip_top #(
     wire array_out_valid;
 
     genvar c;
-
-    //--------------------------------------------------------------
-    // weight banks: write side decodes the linear external address
-    // into (bank=col, row); read side driven by dip_fsm (permuted,
-    // per-bank address).
-    //--------------------------------------------------------------
     wire [ADDR_W-1:0] w_bank_sel = weight_wr_addr % N;       
     wire [ADDR_W-1:0] w_row      = weight_wr_addr / N;
 
@@ -80,11 +46,6 @@ module dip_top #(
             );
         end
     endgenerate
-
-    //--------------------------------------------------------------
-    // activation banks: write side same pattern; read side driven by
-    // dip_fsm (same address across all banks -- no permutation here).
-    //--------------------------------------------------------------
     wire [ADDR_W-1:0] i_bank_sel = input_wr_addr % N;
     wire [ADDR_W-1:0] i_row      = input_wr_addr / N;
 
@@ -104,12 +65,6 @@ module dip_top #(
         end
     endgenerate
 
-    //--------------------------------------------------------------
-    // output banks: write side driven by dip_fsm (captures dip_array's
-    // result, one bank per column, same row address across all banks);
-    // read side decodes the external linear address into (bank, row),
-    // muxing the selected bank's dout out 1 cycle later.
-    //--------------------------------------------------------------
     wire                output_we;
     wire [ADDR_W-1:0]   output_wr_addr;
     wire [N*16-1:0]     output_wr_data_flat;
