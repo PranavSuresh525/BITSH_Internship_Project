@@ -1,13 +1,4 @@
 `timescale 1ns / 1ps
-//////////////////////////////////////////////////////////////////////////////
-// ws_top (integer / fixed-point version)
-//
-// Identical to the decimal ws_top.v -- same BRAM-bank storage (N weight
-// banks + N activation banks + N output banks), same bank addressing
-// scheme, same load/start/busy/done handshake. Only difference: the
-// banks store plain 16-bit fixed-point words (bram_bank) instead of
-// bf16 words (bf16_bram_bank).
-//////////////////////////////////////////////////////////////////////////////
 module ws_top #(
     parameter N = 16
 ) (

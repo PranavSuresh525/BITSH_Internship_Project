@@ -1,26 +1,5 @@
 `timescale 1ns / 1ps
-//////////////////////////////////////////////////////////////////////////////
-// dip_top #(N)  (integer / fixed-point version)
-//
-// Identical to the decimal dip_top.v -- same BRAM-bank storage, same
-// permuted weight-load addressing driven by dip_fsm, same start/busy/done
-// handshake and 1-cycle-latency result read-out. Only difference: the
-// banks store plain 16-bit fixed-point words (bram_bank) instead of
-// bf16 words (bf16_bram_bank).
-//
-// Software/driver contract (unchanged from the decimal version):
-//   1) Write the RAW (unpermuted) weight matrix into the weight banks via
-//      weight_wr_en/weight_wr_addr/weight_wr_data (linear address,
-//      addr = row*N + col -- decoded into bank=col, row internally). The
-//      FSM permutes it on the fly while streaming it into the array.
-//   2) Write the raw (unpermuted) activation matrix the same way via
-//      input_wr_en/input_wr_addr/input_wr_data.
-//   3) Pulse `start` for one cycle.
-//   4) Wait for `done` (pulses high for one cycle).
-//   5) Read the NxN result out one element at a time via
-//      output_rd_addr/output_rd_data (linear address, 1-cycle latency --
-//      present an address, the data is valid the cycle after).
-//////////////////////////////////////////////////////////////////////////////
+
 module dip_top #(
     parameter N = 16
 ) (

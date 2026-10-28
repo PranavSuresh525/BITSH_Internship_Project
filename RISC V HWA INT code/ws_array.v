@@ -1,16 +1,4 @@
 `timescale 1ns / 1ps
-//////////////////////////////////////////////////////////////////////////////
-// ws_array (integer / fixed-point version)
-//
-// Structurally identical to the decimal ws_array.v: same clock gating,
-// same direct weight broadcast + load_row_idx addressing (no shift-through
-// weight load), same per-PE act_valid_in/act_valid_out chain with row-skew
-// input FIFOs, same output-FIFO column realignment scheme. The only
-// difference is the final per-column output stage: a single-cycle
-// truncate-to-16-bit register instead of the 4-stage bf16 pack/round
-// pipeline (there is no float format to convert to here, so
-// CONV_LATENCY = 1 instead of 4).
-//////////////////////////////////////////////////////////////////////////////
 module ws_array #(
     parameter N = 8,
     parameter ACC_WIDTH = 32,

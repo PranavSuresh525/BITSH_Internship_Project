@@ -30,13 +30,6 @@ module ws_fsm #(
 );
 
     localparam ADDR_W = $clog2(N);
-
-    // Output write-back is driven entirely off array_out_valid (like
-    // dip_fsm.v), not off a hardcoded cycle count. That makes it agnostic
-    // to PE_LATENCY_PER_ROW / conversion pipeline depth inside ws_array.v --
-    // no OUT_START/OUT_END bookkeeping needed, and nothing to keep in sync
-    // if those latencies ever change.
-
     localparam ST_IDLE       = 2'd0;
     localparam ST_LOAD_RUN   = 2'd1;
     localparam ST_COMP_RUN   = 2'd2;

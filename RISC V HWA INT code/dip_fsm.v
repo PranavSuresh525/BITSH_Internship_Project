@@ -1,23 +1,5 @@
 `timescale 1ns / 1ps
 
-// dip_fsm -- updated for the pipelined pe_bf16 / fixed48_to_bf16.
-//
-// TIMING CHANGE FROM THE ORIGINAL VERSION:
-// pe_bf16 used to take 1 clock cycle to pass data from one systolic row
-// to the next; it now takes PE_LATENCY_PER_ROW (=3) cycles, because the
-// multiply/cast/accumulate datapath inside each PE was split into a
-// 3-stage pipeline to fix a timing-critical combinational cone (and cut
-// glitch power). fixed48_to_bf16 at the array's output boundary was
-// likewise split into a 3-stage pipeline (CONV_LATENCY = 3).
-//
-// Consequently the last row0-injected activation (issued at cyc = N-1)
-// now takes N*PE_LATENCY_PER_ROW cycles to reach the final row, plus
-// CONV_LATENCY more to clear the output converter, before its result is
-// valid -- vs. just N cycles in the original 1-cycle-per-row design.
-// The output-write window and the state's end-of-compute cycle are
-// derived below instead of hardcoded, so this scales automatically if
-// N or the pipeline depths change (just keep PE_LATENCY_PER_ROW /
-// CONV_LATENCY here in sync with pe_bf16.v / fixed48_to_bf16.v).
 module dip_fsm #(
     parameter N = 16
 ) (

@@ -1,15 +1,4 @@
 `timescale 1ns / 1ps
-//////////////////////////////////////////////////////////////////////////////
-// dip_array (integer / fixed-point version)
-//
-// Structurally identical to the decimal dip_array.v: same clock gating,
-// same clk -> clk_pe control-signal resync register stage, same direct
-// weight broadcast + load_row_idx addressing, same one-valid-bit-per-row
-// diagonal wiring (act_chain[r+1][c] = act_out_grid[r][(c+1)%N]). The
-// only difference is the final per-column output stage: a single-cycle
-// truncate-to-16-bit register instead of fixed48_to_bf16, so
-// CONV_LATENCY = 1 instead of 3.
-//////////////////////////////////////////////////////////////////////////////
 module dip_array #(
     parameter N = 8,
     parameter ACC_WIDTH = 32
